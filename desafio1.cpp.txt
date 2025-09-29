@@ -1,0 +1,576 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cctype>
+
+// Cuenta caracteres hasta '\0'
+int contar_caracteres(const char* texto) {
+    if (texto == NULL) return 0;
+    
+    int contador = 0;
+    while (texto[contador] != '\0') {
+        contador++;
+    }
+    return contador;
+}
+
+// Busca la pista en el texto. Retorna posición o -1
+int buscar_pista_en_texto(const unsigned char* texto_grande, int tamano_texto, const char* pista) {
+    int tamano_pista = contar_caracteres(pista);
+    
+    if (tamano_pista > tamano_texto) return -1;
+    
+    // Recorre el texto buscando coincidencias
+    for (int posicion = 0; posicion <= tamano_texto - tamano_pista; posicion++) {
+        int coincidencias = 0;
+        for (int i = 0; i < tamano_pista; i++) {
+            if (texto_grande[posicion + i] == pista[i]) {
+                coincidencias++;
+            }
+        }
+        
+        if (coincidencias == tamano_pista) {
+            return posicion;
+        }
+    }
+    
+    return -1;
+}
+
+// Rota bits hacia la derecha
+unsigned char rotar_derecha(unsigned char byte_original, int cuantas_posiciones) {
+    cuantas_posiciones = cuantas_posiciones % 8;
+    
+    if (cuantas_posiciones == 0) return byte_original;
+    
+    unsigned char parte_derecha = byte_original >> cuantas_posiciones;
+    unsigned char parte_izquierda = byte_original << (8 - cuantas_posiciones);
+    
+    return parte_derecha | parte_izquierda;
+}
+
+// Desencripta: aplica XOR y rota bits
+unsigned char* desencriptar_mensaje(const unsigned char* datos_encriptados, int tamano, 
+                                     int rotacion, unsigned char clave_xor) {
+    unsigned char* datos_desencriptados = new unsigned char[tamano];
+    
+    for (int i = 0; i < tamano; i++) {
+        // XOR
+        unsigned char byte_despues_xor = datos_encriptados[i] ^ clave_xor;
+        // Rotar
+        unsigned char byte_final = rotar_derecha(byte_despues_xor, rotacion);
+        
+        datos_desencriptados[i] = byte_final;
+    }
+    
+    return datos_desencriptados;
+}
+
+// Lee archivo binario completo
+unsigned char* leer_archivo_binario(const char* nombre_archivo, int& tamano_leido) {
+    tamano_leido = 0;
+    
+    FILE* archivo = fopen(nombre_archivo, "rb");
+    if (archivo == NULL) {
+        return NULL;
+    }
+    
+    // Calcula tamaño del archivo
+    fseek(archivo, 0, SEEK_END);
+    long tamano = ftell(archivo);
+    fseek(archivo, 0, SEEK_SET);
+    
+    // Lee todo
+    unsigned char* contenido = new unsigned char[tamano];
+    fread(contenido, 1, tamano, archivo);
+    fclose(archivo);
+    
+    tamano_leido = (int)tamano;
+    return contenido;
+}
+
+// Lee archivo de texto (la pista)
+char* leer_archivo_texto(const char* nombre_archivo) {
+    FILE* archivo = fopen(nombre_archivo, "r");
+    if (archivo == NULL) {
+        return NULL;
+    }
+    
+    // Calcula tamaño
+    fseek(archivo, 0, SEEK_END);
+    long tamano = ftell(archivo);
+    fseek(archivo, 0, SEEK_SET);
+    
+    // Lee carácter por carácter
+    char* texto = new char[tamano + 1];
+    int posicion = 0;
+    int caracter;
+    while ((caracter = fgetc(archivo)) != EOF && posicion < tamano) {
+        texto[posicion] = (char)caracter;
+        posicion++;
+    }
+    texto[posicion] = '\0';
+    
+    // Quita saltos de línea al final
+    while (posicion > 0 && (texto[posicion-1] == '\n' || texto[posicion-1] == '\r')) {
+        posicion--;
+        texto[posicion] = '\0';
+    }
+    
+    fclose(archivo);
+    return texto;
+}
+
+// Descomprime RLE binario: formato [2 bytes contador][1 byte carácter]
+unsigned char* descomprimir_rle_binario(const unsigned char* datos_comprimidos, 
+                                         int tamano_comprimido, int& tamano_descomprimido) {
+    tamano_descomprimido = 0;
+    
+    // Valida formato: múltiplo de 3
+    if (tamano_comprimido % 3 != 0) {
+        return NULL;
+    }
+    
+    int cantidad_entradas = tamano_comprimido / 3;
+    
+    // Calcula espacio total necesario
+    long espacio_total = 0;
+    for (int i = 0; i < cantidad_entradas; i++) {
+        int byte_alto = datos_comprimidos[i * 3];
+        int byte_bajo = datos_comprimidos[i * 3 + 1];
+        int contador = (byte_alto << 8) | byte_bajo;
+        
+        espacio_total += contador;
+    }
+    
+    if (espacio_total <= 0 || espacio_total > 20000000) {
+        return NULL;
+    }
+    
+    // Descomprime
+    unsigned char* texto_descomprimido = new unsigned char[espacio_total];
+    int posicion_escritura = 0;
+    
+    for (int i = 0; i < cantidad_entradas; i++) {
+        // Lee contador (2 bytes)
+        int byte_alto = datos_comprimidos[i * 3];
+        int byte_bajo = datos_comprimidos[i * 3 + 1];
+        int cuantas_veces = (byte_alto << 8) | byte_bajo;
+        
+        // Lee carácter
+        unsigned char caracter = datos_comprimidos[i * 3 + 2];
+        
+        // Repite el carácter
+        for (int j = 0; j < cuantas_veces; j++) {
+            texto_descomprimido[posicion_escritura] = caracter;
+            posicion_escritura++;
+        }
+    }
+    
+    tamano_descomprimido = posicion_escritura;
+    return texto_descomprimido;
+}
+
+// Descomprime RLE texto: formato "4A3B2C"
+unsigned char* descomprimir_rle_texto(const unsigned char* datos_comprimidos, 
+                                       int tamano_comprimido, int& tamano_descomprimido) {
+    tamano_descomprimido = 0;
+    
+    // Calcula espacio necesario
+    long espacio_total = 0;
+    int posicion = 0;
+    
+    while (posicion < tamano_comprimido) {
+        if (!isdigit(datos_comprimidos[posicion])) {
+            return NULL;
+        }
+        
+        // Lee número
+        long numero = 0;
+        while (posicion < tamano_comprimido && isdigit(datos_comprimidos[posicion])) {
+            numero = numero * 10 + (datos_comprimidos[posicion] - '0');
+            posicion++;
+        }
+        
+        if (posicion >= tamano_comprimido) {
+            return NULL;
+        }
+        
+        posicion++; // Salta carácter
+        espacio_total += numero;
+    }
+    
+    if (espacio_total <= 0 || espacio_total > 20000000) {
+        return NULL;
+    }
+    
+    // Descomprime
+    unsigned char* texto_descomprimido = new unsigned char[espacio_total];
+    posicion = 0;
+    int posicion_escritura = 0;
+    
+    while (posicion < tamano_comprimido) {
+        // Lee número
+        long numero = 0;
+        while (posicion < tamano_comprimido && isdigit(datos_comprimidos[posicion])) {
+            numero = numero * 10 + (datos_comprimidos[posicion] - '0');
+            posicion++;
+        }
+        
+        // Lee carácter
+        unsigned char caracter = datos_comprimidos[posicion];
+        posicion++;
+        
+        // Repite carácter
+        for (long j = 0; j < numero; j++) {
+            texto_descomprimido[posicion_escritura] = caracter;
+            posicion_escritura++;
+        }
+    }
+    
+    tamano_descomprimido = posicion_escritura;
+    return texto_descomprimido;
+}
+
+// Descomprime usando algoritmo LZ78
+unsigned char* descomprimir_lz78(const unsigned char* datos_comprimidos, 
+                                  int tamano_comprimido, int& tamano_descomprimido) {
+    tamano_descomprimido = 0;
+    
+    // Reserva buffer de salida
+    long espacio_buffer = (long)tamano_comprimido * 8;
+    if (espacio_buffer > 20000000) espacio_buffer = 20000000;
+    
+    unsigned char* texto_descomprimido = new unsigned char[espacio_buffer];
+    int posicion_escritura = 0;
+    
+    // Crea diccionario dinámico
+    int capacidad_diccionario = 1024;
+    unsigned char** diccionario = new unsigned char*[capacidad_diccionario];
+    int* tamanos_diccionario = new int[capacidad_diccionario];
+    
+    for (int i = 0; i < capacidad_diccionario; i++) {
+        diccionario[i] = NULL;
+        tamanos_diccionario[i] = 0;
+    }
+    
+    int siguiente_posicion_libre = 1; // 0 = cadena vacía
+    int posicion_lectura = 0;
+    
+    // Procesa cada entrada: [2 bytes índice][1 byte carácter]
+    while (posicion_lectura + 3 <= tamano_comprimido) {
+        // Lee índice
+        int byte_alto = datos_comprimidos[posicion_lectura];
+        int byte_bajo = datos_comprimidos[posicion_lectura + 1];
+        int indice = (byte_alto << 8) | byte_bajo;
+        
+        // Lee carácter nuevo
+        unsigned char caracter_nuevo = datos_comprimidos[posicion_lectura + 2];
+        
+        posicion_lectura += 3;
+        
+        // Construye nueva palabra
+        unsigned char* palabra_nueva = NULL;
+        int tamano_palabra_nueva = 0;
+        
+        if (indice == 0) {
+            // Solo el carácter nuevo
+            tamano_palabra_nueva = 1;
+            palabra_nueva = new unsigned char[1];
+            palabra_nueva[0] = caracter_nuevo;
+        } else if (indice < siguiente_posicion_libre && diccionario[indice] != NULL) {
+            // Palabra del diccionario + carácter nuevo
+            tamano_palabra_nueva = tamanos_diccionario[indice] + 1;
+            palabra_nueva = new unsigned char[tamano_palabra_nueva];
+            
+            // Copia palabra anterior
+            for (int i = 0; i < tamanos_diccionario[indice]; i++) {
+                palabra_nueva[i] = diccionario[indice][i];
+            }
+            
+            // Agrega carácter nuevo
+            palabra_nueva[tamano_palabra_nueva - 1] = caracter_nuevo;
+        } else {
+            // Índice inválido
+            delete[] texto_descomprimido;
+            for (int i = 1; i < siguiente_posicion_libre; i++) {
+                if (diccionario[i] != NULL) delete[] diccionario[i];
+            }
+            delete[] diccionario;
+            delete[] tamanos_diccionario;
+            return NULL;
+        }
+        
+        // Escribe palabra en resultado
+        for (int i = 0; i < tamano_palabra_nueva; i++) {
+            if (posicion_escritura >= espacio_buffer) {
+                delete[] palabra_nueva;
+                delete[] texto_descomprimido;
+                for (int j = 1; j < siguiente_posicion_libre; j++) {
+                    if (diccionario[j] != NULL) delete[] diccionario[j];
+                }
+                delete[] diccionario;
+                delete[] tamanos_diccionario;
+                return NULL;
+            }
+            texto_descomprimido[posicion_escritura] = palabra_nueva[i];
+            posicion_escritura++;
+        }
+        
+        // Guarda palabra en diccionario
+        if (siguiente_posicion_libre >= capacidad_diccionario) {
+            // Expande diccionario
+            int nueva_capacidad = capacidad_diccionario * 2;
+            unsigned char** diccionario_nuevo = new unsigned char*[nueva_capacidad];
+            int* tamanos_nuevo = new int[nueva_capacidad];
+            
+            for (int i = 0; i < capacidad_diccionario; i++) {
+                diccionario_nuevo[i] = diccionario[i];
+                tamanos_nuevo[i] = tamanos_diccionario[i];
+            }
+            
+            for (int i = capacidad_diccionario; i < nueva_capacidad; i++) {
+                diccionario_nuevo[i] = NULL;
+                tamanos_nuevo[i] = 0;
+            }
+            
+            delete[] diccionario;
+            delete[] tamanos_diccionario;
+            diccionario = diccionario_nuevo;
+            tamanos_diccionario = tamanos_nuevo;
+            capacidad_diccionario = nueva_capacidad;
+        }
+        
+        diccionario[siguiente_posicion_libre] = palabra_nueva;
+        tamanos_diccionario[siguiente_posicion_libre] = tamano_palabra_nueva;
+        siguiente_posicion_libre++;
+    }
+    
+    // Libera diccionario
+    for (int i = 1; i < siguiente_posicion_libre; i++) {
+        if (diccionario[i] != NULL) delete[] diccionario[i];
+    }
+    delete[] diccionario;
+    delete[] tamanos_diccionario;
+    
+    tamano_descomprimido = posicion_escritura;
+    return texto_descomprimido;
+}
+
+// Procesa un caso de prueba
+void procesar_un_caso(int numero_caso) {
+    printf("\nprocesando caso %d\n", numero_caso);
+    
+    char nombre_encriptado[100];
+    char nombre_pista[100];
+    
+    // Lee archivo encriptado (intenta mayúscula y minúscula)
+    int tamano_encriptado = 0;
+    unsigned char* datos_encriptados = NULL;
+    
+    snprintf(nombre_encriptado, 100, "Encriptado%d.txt", numero_caso);
+    datos_encriptados = leer_archivo_binario(nombre_encriptado, tamano_encriptado);
+    
+    if (datos_encriptados == NULL) {
+        snprintf(nombre_encriptado, 100, "encriptado%d.txt", numero_caso);
+        datos_encriptados = leer_archivo_binario(nombre_encriptado, tamano_encriptado);
+    }
+    
+    if (datos_encriptados == NULL) {
+        printf("error: no se pudo abrir el archivo (intente Encriptado%d.txt y encriptado%d.txt)\n", 
+               numero_caso, numero_caso);
+        return;
+    }
+    
+    printf("archivo encriptado leido: %d bytes (%s)\n", tamano_encriptado, nombre_encriptado);
+    
+    // Lee pista
+    char* pista = NULL;
+    snprintf(nombre_pista, 100, "pista%d.txt", numero_caso);
+    pista = leer_archivo_texto(nombre_pista);
+    
+    if (pista == NULL) {
+        snprintf(nombre_pista, 100, "Pista%d.txt", numero_caso);
+        pista = leer_archivo_texto(nombre_pista);
+    }
+    
+    if (pista == NULL) {
+        printf("error: no se pudo abrir el archivo de pista (intente pista%d.txt y Pista%d.txt)\n", 
+               numero_caso, numero_caso);
+        delete[] datos_encriptados;
+        return;
+    }
+    
+    printf("pista: \"%s\"\n", pista);
+    printf("buscando parametros correctos...\n");
+    
+    // Prueba todas las combinaciones: rotación (1-7) y clave XOR (0-255)
+    for (int rotacion = 1; rotacion <= 7; rotacion++) {
+        for (int clave = 0; clave <= 255; clave++) {
+            // Desencripta
+            unsigned char* datos_desencriptados = desencriptar_mensaje(
+                datos_encriptados, tamano_encriptado, rotacion, (unsigned char)clave
+            );
+            
+            // Intenta RLE binario
+            int tamano_rle = 0;
+            unsigned char* resultado_rle = descomprimir_rle_binario(
+                datos_desencriptados, tamano_encriptado, tamano_rle
+            );
+            
+            if (resultado_rle != NULL) {
+                int posicion = buscar_pista_en_texto(resultado_rle, tamano_rle, pista);
+                if (posicion >= 0) {
+                    printf("\nencontrado\n");
+                    printf("metodo: RLE\n");
+                    printf("rotacion: %d\n", rotacion);
+                    printf("clave xor: 0x%02X (%d)\n", clave, clave);
+                    printf("tamaño descomprimido: %d bytes\n", tamano_rle);
+                    
+                    // Guarda resultado
+                    char nombre_salida[100];
+                    snprintf(nombre_salida, 100, "resultado_caso%d.txt", numero_caso);
+                    FILE* archivo_salida = fopen(nombre_salida, "wb");
+                    if (archivo_salida != NULL) {
+                        fwrite(resultado_rle, 1, tamano_rle, archivo_salida);
+                        fclose(archivo_salida);
+                        printf("resultado guardado en: %s\n", nombre_salida);
+                    }
+                    
+                    // Muestra vista previa
+                    printf("vista previa: ");
+                    for (int i = 0; i < 100 && i < tamano_rle; i++) {
+                        if (isprint(resultado_rle[i])) {
+                            printf("%c", resultado_rle[i]);
+                        } else {
+                            printf(".");
+                        }
+                    }
+                    printf("...\n");
+                    
+                    delete[] resultado_rle;
+                    delete[] datos_desencriptados;
+                    delete[] datos_encriptados;
+                    delete[] pista;
+                    return;
+                }
+                delete[] resultado_rle;
+            }
+            
+            // Intenta RLE texto
+            int tamano_rle_texto = 0;
+            unsigned char* resultado_rle_texto = descomprimir_rle_texto(
+                datos_desencriptados, tamano_encriptado, tamano_rle_texto
+            );
+            
+            if (resultado_rle_texto != NULL) {
+                int posicion = buscar_pista_en_texto(resultado_rle_texto, tamano_rle_texto, pista);
+                if (posicion >= 0) {
+                    printf("\nencontrado\n");
+                    printf("metodo: RLE formato texto\n");
+                    printf("rotacion: %d\n", rotacion);
+                    printf("clave xor: 0x%02X (%d)\n", clave, clave);
+                    printf("tamaño descomprimido: %d bytes\n", tamano_rle_texto);
+                    
+                    char nombre_salida[100];
+                    snprintf(nombre_salida, 100, "resultado_caso%d.txt", numero_caso);
+                    FILE* archivo_salida = fopen(nombre_salida, "wb");
+                    if (archivo_salida != NULL) {
+                        fwrite(resultado_rle_texto, 1, tamano_rle_texto, archivo_salida);
+                        fclose(archivo_salida);
+                        printf("resultado guardado en: %s\n", nombre_salida);
+                    }
+                    
+                    printf("vista previa: ");
+                    for (int i = 0; i < 100 && i < tamano_rle_texto; i++) {
+                        if (isprint(resultado_rle_texto[i])) {
+                            printf("%c", resultado_rle_texto[i]);
+                        } else {
+                            printf(".");
+                        }
+                    }
+                    printf("...\n");
+                    
+                    delete[] resultado_rle_texto;
+                    delete[] datos_desencriptados;
+                    delete[] datos_encriptados;
+                    delete[] pista;
+                    return;
+                }
+                delete[] resultado_rle_texto;
+            }
+            
+            // Intenta LZ78
+            int tamano_lz78 = 0;
+            unsigned char* resultado_lz78 = descomprimir_lz78(
+                datos_desencriptados, tamano_encriptado, tamano_lz78
+            );
+            
+            if (resultado_lz78 != NULL) {
+                int posicion = buscar_pista_en_texto(resultado_lz78, tamano_lz78, pista);
+                if (posicion >= 0) {
+                    printf("\nencontrado\n");
+                    printf("metodo: LZ78\n");
+                    printf("rotacion: %d\n", rotacion);
+                    printf("clave xor: 0x%02X (%d)\n", clave, clave);
+                    printf("tamaño descomprimido: %d bytes\n", tamano_lz78);
+                    
+                    char nombre_salida[100];
+                    snprintf(nombre_salida, 100, "resultado_caso%d.txt", numero_caso);
+                    FILE* archivo_salida = fopen(nombre_salida, "wb");
+                    if (archivo_salida != NULL) {
+                        fwrite(resultado_lz78, 1, tamano_lz78, archivo_salida);
+                        fclose(archivo_salida);
+                        printf("resultado guardado en: %s\n", nombre_salida);
+                    }
+                    
+                    printf("vista previa: ");
+                    for (int i = 0; i < 100 && i < tamano_lz78; i++) {
+                        if (isprint(resultado_lz78[i])) {
+                            printf("%c", resultado_lz78[i]);
+                        } else {
+                            printf(".");
+                        }
+                    }
+                    printf("...\n");
+                    
+                    delete[] resultado_lz78;
+                    delete[] datos_desencriptados;
+                    delete[] datos_encriptados;
+                    delete[] pista;
+                    return;
+                }
+                delete[] resultado_lz78;
+            }
+            
+            delete[] datos_desencriptados;
+        }
+    }
+    
+    printf("no se encontro solucion para este caso\n");
+    delete[] datos_encriptados;
+    delete[] pista;
+}
+
+int main() {
+    printf("\ndescifrador de mensajes desafio 1\n");
+    printf("algoritmos: rle y lz78\n\n");
+    
+    printf("cuantos casos quieres evaluar: ");
+    int numero_casos = 0;
+    scanf("%d", &numero_casos);
+    
+    if (numero_casos <= 0) {
+        printf("numero invalido\n");
+        return 1;
+    }
+    
+    // Procesa cada caso
+    for (int i = 1; i <= numero_casos; i++) {
+        procesar_un_caso(i);
+    }
+    
+    printf("\nproceso terminado\n");
+    printf("revisa los archivos resultado_casoX.txt\n\n");
+    
+    return 0;
+}
